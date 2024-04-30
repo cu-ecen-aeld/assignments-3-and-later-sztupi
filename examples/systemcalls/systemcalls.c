@@ -1,4 +1,12 @@
 #include "systemcalls.h"
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <syslog.h>
+#include <sys/file.h>
+
 
 /**
  * @param cmd the command to execute with system()
@@ -16,8 +24,9 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+    int result = system(cmd);
 
-    return true;
+    return result == 0;
 }
 
 /**
@@ -45,9 +54,6 @@ bool do_exec(int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
 
 /*
  * TODO:
@@ -59,9 +65,39 @@ bool do_exec(int count, ...)
  *
 */
 
-    va_end(args);
+    int pid = fork();
+    if (pid == 0) {
+        for (int i = 0; i<count; i++){
+            syslog(LOG_DEBUG, "child process args %d: %s", i, command[i]);
+        }
+        int result = execv(command[0], command);
+        if (result == -1) {
+            int err = errno;
+            const char * errstr = strerror(err);
+            syslog(LOG_ERR, "child process failed to start: %s", errstr);
+            exit(-1);
+        }
+        // will never reach it, here only to satisfy C branch checker
+        exit(0);
+    } else {
+        int wstatus;
+        pid_t resultPid = waitpid(pid, &wstatus, 0);
+        if (resultPid == -1) {
+            int waitErr = errno;
+            const char * errstr = strerror(waitErr);
+            syslog(LOG_ERR, "child process execution failed: %s", errstr);
+            return false;
+        }
+        if (WIFEXITED(wstatus)) {
+            syslog(LOG_DEBUG, "child process exited with status %d", WEXITSTATUS(wstatus));
+            return WEXITSTATUS(wstatus) == 0;
+        } else {
+            syslog(LOG_DEBUG, "child process did not exit properly");
+            return false;
+        }
+    }
 
-    return true;
+    va_end(args);
 }
 
 /**
@@ -82,8 +118,6 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
-
 
 /*
  * TODO
@@ -92,6 +126,46 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    int fd = creat(outputfile, 0644);
+    if (fd < 0) {
+        int err = errno;
+        const char * errstr = strerror(err);
+        syslog(LOG_ERR, "cannot create output file %s: %s", outputfile, errstr);
+        return false;
+    }
+
+    int pid = fork();
+    if (pid == 0) {
+        if (dup2(fd, 1) < 0) {
+            int err = errno;
+            const char * errstr = strerror(err);
+            syslog(LOG_ERR, "child process failed to duplicate output file handle: %s", errstr);
+            return false;
+        }
+        if (execv(command[0], command) == -1) {
+            int err = errno;
+            const char * errstr = strerror(err);
+            syslog(LOG_ERR, "child process failed to start: %s", errstr);
+            return false;
+        }
+        // will never reach this, here only to satisfy C branch checker
+        return true;
+    } else {
+        close(fd);
+
+        int wstatus;
+        if (waitpid(pid, &wstatus, 0) == -1) {
+            int waitErr = errno;
+            const char * errstr = strerror(waitErr);
+            syslog(LOG_ERR, "child process execution failed: %s", errstr);
+            return false;
+        }
+        if (WIFEXITED(wstatus)) {
+            return (WEXITSTATUS(wstatus)) == 0;
+        } else {
+            return false;
+        }
+    }
 
     va_end(args);
 
