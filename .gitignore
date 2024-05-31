@@ -8,3 +8,4 @@ aesd-build
 test.sh.log
 valgrind-out.txt
 compile_commands.json
+/server/aesdsocket
