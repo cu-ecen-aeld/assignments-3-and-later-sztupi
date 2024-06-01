@@ -295,7 +295,7 @@ void * th_timer(void * arg) {
     outstr[size-1] = '\n';
 
     const char prefix[] = "timestamp:";
-    write(fdtarget, prefix, sizeof(prefix));
+    write(fdtarget, prefix, sizeof(prefix)-1);
     write(fdtarget, outstr, size);
     close(fdtarget);
 
