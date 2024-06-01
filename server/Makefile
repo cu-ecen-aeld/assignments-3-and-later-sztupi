@@ -1,8 +1,7 @@
-TARGET=aesdsocket
-CC=${CROSS_COMPILE}gcc
-HEADERS=
-OBJECTS=aesdsocket.o
-LDFLAGS=-pthread
+TARGET = aesdsocket
+HEADERS =
+OBJECTS = aesdsocket.o
+LDFLAGS += -pthread
 
 .PHONY: default all clean
 
@@ -10,7 +9,7 @@ default: $(TARGET)
 all: default
 
 %.o: %.c $(HEADERS)
-	$(CC) -c $< -o $@
+	$(CC) $(CCFLAGS) -c $< -o $@
 
 .PRECIOUS: $(TARGET) $(OBJECTS)
 
