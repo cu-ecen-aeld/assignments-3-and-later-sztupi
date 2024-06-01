@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <bits/time.h>
 #include <sys/file.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -11,7 +12,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include <time.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <sys/queue.h>
 
 int terminated = 0;
 
@@ -45,7 +49,6 @@ int listen_socket(int daemon, struct addrinfo **servinfo) {
     syslog(LOG_ERR, "Error binding socket to port: %s", strerror(errno));
     return -1;
   }
-  syslog(LOG_DEBUG, "Bound to port");
 
   if (daemon) {
     int pid = fork();
@@ -62,7 +65,6 @@ int listen_socket(int daemon, struct addrinfo **servinfo) {
     syslog(LOG_ERR, "Error listening: %s", strerror(errno));
     return -1;
   }
-  syslog(LOG_DEBUG, "Listening on port");
 
   return socketfd;
 }
@@ -71,7 +73,6 @@ int wait_for_connection(int socketfd, struct sockaddr_storage * addr) {
   fd_set read_fds;
   FD_ZERO(&read_fds);
   FD_SET(socketfd, &read_fds);
-  syslog(LOG_DEBUG, "Waiting for connection");
   int selectres = select(socketfd+1, &read_fds, NULL, NULL, NULL);
   if (selectres == -1) {
     if (errno == EINTR) {
@@ -81,7 +82,6 @@ int wait_for_connection(int socketfd, struct sockaddr_storage * addr) {
       return -1;
     }
   }
-  syslog(LOG_DEBUG, "Incoming connection");
 
   socklen_t addr_size;
   addr_size = sizeof(&addr);
@@ -190,12 +190,10 @@ void send_data(int fdTarget, int fdSource) {
     char msg[257];
     strncpy(msg, send_buf, send_len);
     msg[send_len] = '\0';
-    syslog(LOG_DEBUG, "Sending %s", msg);
     ssize_t total_sent = 0;
     while (total_sent < send_len) {
       ssize_t sent =
           send(fdTarget, send_buf + total_sent, send_len - total_sent, 0);
-      syslog(LOG_DEBUG, "Sent %d", (int)sent);
       total_sent += sent;
     }
     send_len = read(fdSource, send_buf, 256);
@@ -205,6 +203,105 @@ void send_data(int fdTarget, int fdSource) {
       exit(-1);
     }
   }
+}
+
+typedef struct {
+  int connfd;
+  int done;
+  struct sockaddr_storage conn_addr;
+  pthread_mutex_t *mutex;
+} thread_data_t;
+
+typedef struct tl_entry {
+  pthread_t thread;
+  thread_data_t tdata;
+  SLIST_ENTRY(tl_entry) list;
+} tl_entry_t;
+
+SLIST_HEAD(tl_list, tl_entry);
+
+void * th_listen(void * arg) {
+  thread_data_t *data = (thread_data_t *)arg;
+
+  struct stream_data stream;
+  stream_allocate(&stream);
+
+  int client_eof = 0;
+  while (!client_eof && !terminated) {
+    int status = wait_for_data(data->connfd);
+    if (status == -1)
+      exit(-1);
+    else if (status == 0)
+      continue;
+
+    status = stream_receive(data->connfd, &stream);
+    if (status == 0)
+      client_eof = 1;
+
+    while (stream_process(&stream)) {
+      pthread_mutex_lock(data->mutex);
+      int fdtarget =
+          open("/var/tmp/aesdsocketdata", O_CREAT | O_APPEND | O_WRONLY, 0644);
+      stream_write(&stream, fdtarget);
+      close(fdtarget);
+
+      int fddata = open("/var/tmp/aesdsocketdata", O_RDONLY);
+      send_data(data->connfd, fddata);
+      close(fddata);
+      pthread_mutex_unlock(data->mutex);
+    }
+  }
+
+  stream_free(&stream);
+
+  syslog(LOG_INFO, "Closed connection from %s",
+         inet_ntoa(((struct sockaddr_in *)&(data->conn_addr))->sin_addr));
+
+  return NULL;
+}
+
+typedef struct {
+  pthread_mutex_t *mutex;
+} timer_th_data_t;
+
+void * th_timer(void * arg) {
+  timer_th_data_t *data = (timer_th_data_t *)arg;
+
+  struct timespec t;
+  int ret = clock_gettime(CLOCK_MONOTONIC, &t);
+  if (ret) { perror("clock_gettime"); exit(-1); }
+
+  t.tv_sec += 10;
+
+  while (!terminated) {
+    ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
+    if (ret == EINTR) {
+      if (terminated) break; else continue;
+    }
+    t.tv_sec += 10;
+
+    pthread_mutex_lock(data->mutex);
+    int fdtarget = open("/var/tmp/aesdsocketdata", O_CREAT | O_APPEND | O_WRONLY, 0644);
+    if (fdtarget < 0) {
+      syslog(LOG_ERR, "timer couldn't open file");
+      perror("open");
+      exit(-1);
+    }
+
+    time_t now = time(NULL);
+    struct tm *nowtm = gmtime(&now);
+    char outstr[200];
+    int size = strftime(outstr, sizeof(outstr)-1, "%a, %d %b %Y %T %z", nowtm);
+    outstr[size-1] = '\n';
+
+    const char prefix[] = "timestamp:";
+    write(fdtarget, prefix, sizeof(prefix));
+    write(fdtarget, outstr, size);
+    close(fdtarget);
+
+    pthread_mutex_unlock(data->mutex);
+  }
+  return NULL;
 }
 
 int main(int argc, char* argv[]) {
@@ -227,6 +324,16 @@ int main(int argc, char* argv[]) {
   int socketfd = listen_socket(daemon, &servinfo);
   if (socketfd == -1) exit(-1);
 
+  struct tl_list tl_list;
+  SLIST_INIT(&tl_list);
+
+  pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+  timer_th_data_t timer_data;
+  timer_data.mutex = &file_mutex;
+  pthread_t timer;
+  pthread_create(&(timer), NULL, &th_timer, (void *)&timer_data);
+
   while (!terminated) {
     struct sockaddr_storage conn_addr;
     int connfd = wait_for_connection(socketfd, &conn_addr);
@@ -235,36 +342,39 @@ int main(int argc, char* argv[]) {
     else if (connfd == 0)
       continue;
 
-    struct stream_data stream;
-    stream_allocate(&stream);
+    tl_entry_t *listener = (tl_entry_t *)malloc(sizeof(tl_entry_t));
 
-    int client_eof = 0;
-    while (!client_eof && !terminated) {
-      int status = wait_for_data(connfd);
-      if (status == -1) exit(-1);
-      else if (status == 0) continue;
+    listener->tdata.connfd = connfd;
+    listener->tdata.conn_addr = conn_addr;
+    listener->tdata.done = 0;
+    listener->tdata.mutex = &file_mutex;
 
-      status = stream_receive(connfd, &stream);
-      if (status == 0) client_eof = 1;
+    pthread_create(&(listener->thread), NULL, &th_listen, (void *)&(listener->tdata));
+    SLIST_INSERT_HEAD(&tl_list, listener, list);
 
-      while (stream_process(&stream)) {
-        int fdtarget = open("/var/tmp/aesdsocketdata", O_CREAT | O_APPEND | O_WRONLY, 0644);
-        stream_write(&stream, fdtarget);
-        close(fdtarget);
-
-        int fddata = open("/var/tmp/aesdsocketdata", O_RDONLY);
-        send_data(connfd, fddata);
-        close(fddata);
-      }
+    tl_entry_t * entry = SLIST_FIRST(&tl_list);
+    while (entry != NULL && entry->tdata.done) {
+      SLIST_REMOVE_HEAD(&tl_list, list);
+      pthread_join(entry->thread, NULL);
+      free(entry);
+      entry = SLIST_FIRST(&tl_list);
     }
-
-    stream_free(&stream);
-
-    syslog(LOG_INFO, "Closed connection from %s",
-           inet_ntoa(((struct sockaddr_in *)&conn_addr)->sin_addr));
+    while (entry != NULL) {
+      tl_entry_t * next = SLIST_NEXT(entry, list);
+      while (next != NULL && next->tdata.done) {
+        SLIST_REMOVE(&tl_list, next, tl_entry, list);
+        pthread_join(next->thread, NULL);
+        free(next);
+        next = SLIST_NEXT(entry, list);
+      }
+      entry = next;
+    }
   }
 
   syslog(LOG_INFO, "Caught signal, exiting");
+
+  pthread_kill(timer, SIGINT);
+  pthread_join(timer, NULL);
 
   remove("/var/tmp/aesdsocketdata");
   if (socketfd) close(socketfd);

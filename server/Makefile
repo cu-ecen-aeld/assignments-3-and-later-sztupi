@@ -2,6 +2,7 @@ TARGET=aesdsocket
 CC=${CROSS_COMPILE}gcc
 HEADERS=
 OBJECTS=aesdsocket.o
+LIBS=-lpthread
 
 .PHONY: default all clean
 
@@ -14,7 +15,7 @@ all: default
 .PRECIOUS: $(TARGET) $(OBJECTS)
 
 $(TARGET): $(OBJECTS)
-	$(CC) $(OBJECTS) -o $(TARGET)
+	$(CC) $(OBJECTS) $(LIBS) -o $(TARGET)
 
 clean:
 	-rm -f writer $(OBJECTS)
