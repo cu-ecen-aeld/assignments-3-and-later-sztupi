@@ -243,6 +243,7 @@ void * th_listen(void * arg) {
       int fdtarget =
           open("/var/tmp/aesdsocketdata", O_CREAT | O_APPEND | O_WRONLY, 0644);
       stream_write(&stream, fdtarget);
+      fsync(fdtarget);
       close(fdtarget);
 
       int fddata = open("/var/tmp/aesdsocketdata", O_RDONLY);
