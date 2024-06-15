@@ -297,7 +297,7 @@ void * th_timer(void * arg) {
       exit(-1);
     }
 
-    #ifdef USE_AESD_CHAR_DEVICE
+    #ifndef USE_AESD_CHAR_DEVICE
     time_t now = time(NULL);
     struct tm *nowtm = gmtime(&now);
     char outstr[200];
