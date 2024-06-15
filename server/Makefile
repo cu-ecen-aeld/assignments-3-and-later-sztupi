@@ -2,6 +2,11 @@ TARGET = aesdsocket
 HEADERS =
 OBJECTS = aesdsocket.o
 LDFLAGS += -pthread
+USE_AESD_CHAR_DEVICE ?= 1
+
+ifeq ($(USE_AESD_CHAR_DEVICE),1)
+CCFLAGS += -DUSE_AESD_CHAR_DEVICE
+endif
 
 .PHONY: default all clean
 

@@ -19,6 +19,14 @@
 
 int terminated = 0;
 
+const char * targetFile =
+  #ifdef USE_AESD_CHAR_DEVICE
+    "/dev/aesdchar"
+  #else
+    "/var/tmp/aesdsocketdata"
+  #endif
+  ;
+
 void handle_signal(int sig) {
   if (sig == SIGTERM || sig == SIGINT) {
     terminated = 1;
@@ -241,12 +249,12 @@ void * th_listen(void * arg) {
     while (stream_process(&stream)) {
       pthread_mutex_lock(data->mutex);
       int fdtarget =
-          open("/var/tmp/aesdsocketdata", O_CREAT | O_APPEND | O_WRONLY, 0644);
+          open(targetFile, O_CREAT | O_APPEND | O_WRONLY, 0644);
       stream_write(&stream, fdtarget);
       fsync(fdtarget);
       close(fdtarget);
 
-      int fddata = open("/var/tmp/aesdsocketdata", O_RDONLY);
+      int fddata = open(targetFile, O_RDONLY);
       send_data(data->connfd, fddata);
       close(fddata);
       pthread_mutex_unlock(data->mutex);
@@ -282,13 +290,14 @@ void * th_timer(void * arg) {
     t.tv_sec += 10;
 
     pthread_mutex_lock(data->mutex);
-    int fdtarget = open("/var/tmp/aesdsocketdata", O_CREAT | O_APPEND | O_WRONLY, 0644);
+    int fdtarget = open(targetFile, O_CREAT | O_APPEND | O_WRONLY, 0644);
     if (fdtarget < 0) {
       syslog(LOG_ERR, "timer couldn't open file");
       perror("open");
       exit(-1);
     }
 
+    #ifdef USE_AESD_CHAR_DEVICE
     time_t now = time(NULL);
     struct tm *nowtm = gmtime(&now);
     char outstr[200];
@@ -298,6 +307,8 @@ void * th_timer(void * arg) {
     const char prefix[] = "timestamp:";
     write(fdtarget, prefix, sizeof(prefix)-1);
     write(fdtarget, outstr, size);
+    #endif
+
     close(fdtarget);
 
     pthread_mutex_unlock(data->mutex);
@@ -377,7 +388,9 @@ int main(int argc, char* argv[]) {
   pthread_kill(timer, SIGINT);
   pthread_join(timer, NULL);
 
-  remove("/var/tmp/aesdsocketdata");
+  #ifndef USE_AESD_CHAR_DEVICE
+  remove(targetFile);
+  #endif
   if (socketfd) close(socketfd);
   freeaddrinfo(servinfo);
 
