@@ -51,10 +51,6 @@ int aesd_release(struct inode *inode, struct file *filp)
 {
     PDEBUG("release");
 
-	struct aesd_dev *dev;
-    dev = container_of(inode->i_cdev, struct aesd_dev, cdev);
-	filp->private_data = dev;
-
     return 0;
 }
 
@@ -76,40 +72,59 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
         entry = aesd_circular_buffer_find_entry_offset_for_fpos(
             &dev->circ_buffer, *f_pos, &offset);
 
-        if (!entry) goto out;
+        if (!entry) {
+            PDEBUG("couldn't find an entry at offset %lld", *f_pos);
+            goto out;
+        }
 
-        ssize_t copied = copy_to_user(
+        ssize_t copy_size = min(count-retval, entry->size-offset);
+        ssize_t not_copied = copy_to_user(
             target,
             entry->buffptr+offset,
-            min(count-retval, entry->size-offset));
+            copy_size);
+
+        ssize_t copied = copy_size - not_copied;
 
         target = target + copied;
         *f_pos += copied;
         retval += copied;
+
+        if (!not_copied) {
+            PDEBUG("couldn't copy %d out of %d bytes to user", not_copied, copy_size);
+            goto out;
+        }
+
     }
 
   out : mutex_unlock(&dev->lock);
+    PDEBUG("finished reading %zu bytes",retval);
     return retval;
 }
 
 ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
                 loff_t *f_pos)
 {
-    ssize_t retval = -ENOMEM;
+    ssize_t retval = 0;
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
 
     struct aesd_dev *dev = filp->private_data;
     if (mutex_lock_interruptible(&dev->lock))
         return -ERESTARTSYS;
 
+    PDEBUG("trying to allocate buffer for input data size %d", dev->unterminated_count+count);
     char *kbuf = (char *)krealloc(dev->unterminated,
                                   dev->unterminated_count+count,
                                   GFP_KERNEL);
     if (!kbuf) {
+        PDEBUG("failed to allocate buffer for input data size %d", dev->unterminated_count+count);
         retval = -ENOMEM;
         goto out;
     }
+    dev->unterminated = kbuf;
+
+    PDEBUG("trying to copy data from user");
     if (copy_from_user(dev->unterminated+dev->unterminated_count, buf, count)) {
+        PDEBUG("failed to copy data from user");
         retval = -EFAULT;
         goto out;
     }
@@ -124,24 +139,34 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 
         struct aesd_buffer_entry entry;
 
+        PDEBUG("trying to allocate buffer for user data of size %d", idx+1);
         char *buff = kmalloc(idx+1, GFP_KERNEL);
         if (!buff) {
+            PDEBUG("failed to allocate buffer for user data of size %d", idx+1);
             retval = -ENOMEM;
             goto out;
         }
         strncpy(buff, dev->unterminated, idx+1);
         entry.buffptr = buff;
+        entry.size = idx+1;
 
         if (dev->circ_buffer.full) {
+            PDEBUG("freeing up overridden buffer entry");
             kfree(dev->circ_buffer.entry[dev->circ_buffer.out_offs].buffptr);
         }
 
+        PDEBUG("adding buffer entry of size %d", entry.size);
         aesd_circular_buffer_add_entry(&dev->circ_buffer, &entry);
 
         if (dev->unterminated_count > idx+1) {
+            PDEBUG("reducing unterminated buffer");
             char * unterminated = kmalloc(dev->unterminated_count - idx - 1,
                                           GFP_KERNEL);
+            PDEBUG("trying to allocate buffer for remaining data of size %d",
+                   dev->unterminated_count - idx - 1);
             if (!unterminated) {
+                PDEBUG("failed to allocate buffer for remaining data of size %d",
+                       dev->unterminated_count - idx - 1);
                 retval = -ENOMEM;
                 goto out;
             }
@@ -152,12 +177,15 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
             dev->unterminated_count = dev->unterminated_count-idx-1;
             idx = 0;
         } else {
+            PDEBUG("clearing unterminated");
             kfree(dev->unterminated);
             dev->unterminated = NULL;
             dev->unterminated_count = 0;
             idx = 0;
         }
     }
+    retval = count;
+    PDEBUG("written %d bytes", retval);
 
   out:
     mutex_unlock(&dev->lock);
