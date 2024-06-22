@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <bits/time.h>
 #include <sys/file.h>
+#include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/syslog.h>
@@ -16,6 +17,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/queue.h>
+#include "aesd_ioctl.h"
 
 int terminated = 0;
 
@@ -181,10 +183,38 @@ int stream_process(struct stream_data *stream) {
   return stream->buf[stream->pos] == '\n';
 }
 
-void stream_write(struct stream_data *stream, int fd) {
-  write(fd, stream->buf, stream->pos+1);
+void stream_flush_line(struct stream_data *stream) {
   strncpy(stream->buf, stream->buf + stream->pos+1, stream->unprocessed);
   stream->pos = 0;
+}
+
+void stream_write(struct stream_data *stream, int fd) {
+  write(fd, stream->buf, stream->pos+1);
+  stream_flush_line(stream);
+}
+
+const char* CMD_SEEKTO = "AESDCHAR_IOCSEEKTO:";
+
+void stream_seekto(struct stream_data *stream, int fd) {
+  char * endp;
+  int cmd = strtol(stream->buf + strlen(CMD_SEEKTO), &endp, 10);
+  int offset = strtol(endp+1, &endp, 10);
+
+  struct aesd_seekto seekto = {.write_cmd = cmd, .write_cmd_offset = offset};
+  ioctl(fd, AESDCHAR_IOCSEEKTO, &seekto);
+  stream_flush_line(stream);
+}
+
+const int STREAM_LINE_TYPE_DATA = 0;
+const int STREAM_LINE_TYPE_SEEKTO = 1;
+
+
+int stream_line_type(struct stream_data *stream) {
+  if (stream->pos >= strlen(CMD_SEEKTO) &&
+      strncmp(stream->buf, CMD_SEEKTO, strlen(CMD_SEEKTO)) == 0) {
+    return STREAM_LINE_TYPE_SEEKTO;
+  }
+  return STREAM_LINE_TYPE_DATA;
 }
 
 void send_data(int fdTarget, int fdSource) {
@@ -248,15 +278,27 @@ void * th_listen(void * arg) {
 
     while (stream_process(&stream)) {
       pthread_mutex_lock(data->mutex);
-      int fdtarget =
-          open(targetFile, O_CREAT | O_APPEND | O_WRONLY, 0644);
-      stream_write(&stream, fdtarget);
-      fsync(fdtarget);
-      close(fdtarget);
+      switch (stream_line_type(&stream)) {
+        case STREAM_LINE_TYPE_DATA: {
+          int fdtarget = open(targetFile, O_CREAT | O_APPEND | O_WRONLY, 0644);
+          stream_write(&stream, fdtarget);
+          fsync(fdtarget);
+          close(fdtarget);
 
-      int fddata = open(targetFile, O_RDONLY);
-      send_data(data->connfd, fddata);
-      close(fddata);
+          int fddata = open(targetFile, O_RDONLY);
+          send_data(data->connfd, fddata);
+          close(fddata);
+          break;
+        }
+        case STREAM_LINE_TYPE_SEEKTO: {
+          int fdtarget = open(targetFile, O_RDONLY, 0644);
+          stream_seekto(&stream, fdtarget);
+          send_data(data->connfd, fdtarget);
+          fsync(fdtarget);
+          close(fdtarget);
+          break;
+        }
+      }
       pthread_mutex_unlock(data->mutex);
     }
   }

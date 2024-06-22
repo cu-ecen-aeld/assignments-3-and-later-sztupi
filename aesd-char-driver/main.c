@@ -228,11 +228,13 @@ long aesd_adjust_file_offset(struct file *filp, struct aesd_seekto *seekto) {
     struct aesd_buffer_entry *entry;
     AESD_CIRCULAR_BUFFER_FOREACH(entry, &dev->circ_buffer, index) {
         if (index == seekto->write_cmd) {
-            if (entry->size < seekto->write_cmd_offset) {
+            if (entry->size > seekto->write_cmd_offset) {
+                PDEBUG("seting offset to %d", prev_size + seekto->write_cmd_offset);
                 filp->f_pos = prev_size + seekto->write_cmd_offset;
                 retval = 0;
                 goto out;
             } else {
+                PDEBUG("seting offset fail due to too long cmd offset");
                 retval = -EINVAL;
                 goto out;
             }
@@ -240,7 +242,7 @@ long aesd_adjust_file_offset(struct file *filp, struct aesd_seekto *seekto) {
             prev_size += entry->size;
         }
     }
-    // index not found
+    PDEBUG("seting offset fail due to too large cmd index");
     retval = -EINVAL;
 
   out:
